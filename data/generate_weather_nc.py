@@ -1,21 +1,48 @@
 import xarray as xr
 import pandas as pd
 import numpy as np
+import geopandas as gpd
+from scipy.ndimage import gaussian_filter
+import tempfile
 
-# Generate dummy weather data
-times = pd.date_range("2023-01-01", "2023-12-31 23:00:00", freq="H")
-wind_speed = np.random.uniform(0, 10, len(times))
-pressure = np.random.uniform(900, 1100, len(times))
-thermal = wind_speed * 1000 / pressure
-turbine_active = wind_speed > 3
-
-ds = xr.Dataset(
-    {
-        "wind_speed": (["time"], wind_speed),
-        "pressure": (["time"], pressure),
-        "thermal": (["time"], thermal),
-        "turbine_active": (["time"], turbine_active)
-    },
-    coords={"time": times}
-)
-ds.to_netcdf("data/weather.nc")
+def generate_weather_nc(lidar_file, seed):
+    np.random.seed(seed)
+    dem = gpd.read_file(lidar_file)
+    lat = np.array([p.y for p in dem.geometry])
+    lon = np.array([p.x for p in dem.geometry])
+    elevation = dem['elevation'].values
+    slope = dem['slope'].values
+    n_points = int(np.sqrt(len(lat)))
+    lat_grid = lat.reshape((n_points, n_points))
+    lon_grid = lon.reshape((n_points, n_points))
+    elevation_grid = elevation.reshape((n_points, n_points))
+    slope_grid = slope.reshape((n_points, n_points))
+    times = pd.date_range("2023-01-01", "2023-12-31 23:00:00", freq="h")
+    base_wind_speed = 5 + 5 * np.sin(2 * np.pi * np.arange(len(times)) / 24) + np.random.normal(0, 2, len(times))
+    wind_factor = 0.01 * elevation_grid + 0.005 * slope_grid
+    wind_factor = gaussian_filter(wind_factor, sigma=2)
+    wind_speed = np.zeros((len(times), n_points, n_points))
+    pressure = np.zeros((len(times), n_points, n_points))
+    for t in range(len(times)):
+        wind_speed[t] = base_wind_speed[t] + wind_factor + np.random.normal(0, 1, (n_points, n_points))
+        pressure[t] = 1013 - 0.1 * elevation_grid + np.random.normal(0, 5, (n_points, n_points))
+    thermal = wind_speed * 1000 / pressure
+    turbine_active = wind_speed > 3
+    ds = xr.Dataset(
+        {
+            "wind_speed": (["time", "lat", "lon"], wind_speed),
+            "pressure": (["time", "lat", "lon"], pressure),
+            "thermal": (["time", "lat", "lon"], thermal),
+            "turbine_active": (["time", "lat", "lon"], turbine_active),
+            "elevation": (["lat", "lon"], elevation_grid),
+            "slope": (["lat", "lon"], slope_grid)
+        },
+        coords={
+            "time": times,
+            "lat": np.linspace(-34.2, -33.6, n_points),
+            "lon": np.linspace(25.3, 25.9, n_points)
+        }
+    )
+    with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as f:
+        ds.to_netcdf(f.name)
+        return f.name
