@@ -43,6 +43,8 @@ def generate_weather_nc(lidar_file, seed):
             "lon": np.linspace(25.3, 25.9, n_points)
         }
     )
+    ds["time"].attrs["units"] = "hours since 2023-01-01 00:00:00"
+    ds["time"].attrs["calendar"] = "gregorian"
     with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as f:
-        ds.to_netcdf(f.name)
+        ds.to_netcdf(f.name, encoding={"time": {"dtype": "int32", "units": "hours since 2023-01-01 00:00:00", "calendar": "gregorian"}})
         return f.name
