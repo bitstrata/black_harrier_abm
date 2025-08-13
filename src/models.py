@@ -2,9 +2,12 @@ from mesa import Agent, Model
 from mesa.time import RandomActivation
 from mesa.space import ContinuousSpace
 from mesa.datacollection import DataCollector
+import pandas as pd
 import random
 import math
-from src.data_processing import BSA_HEIGHT, MIGRATION_HEIGHT, BREEDING_MONTHS, MIGRATION_MONTHS, FORAGING_RANGE, NON_BREEDING_RANGE, DISPLACEMENT_RADIUS, NEST_FAIL_PROB, ROOST_BUFFER_COMMUNAL, ROOST_BUFFER_SINGLE, NEST_BUFFER_VERY_HIGH, MITIGATION_BLADE_PAINT, MITIGATION_SHUTDOWN, PREY_REDUCTION_FACTOR
+from src.config import BSA_HEIGHT, MIGRATION_HEIGHT, BREEDING_MONTHS, MIGRATION_MONTHS, FORAGING_RANGE, NON_BREEDING_RANGE, DISPLACEMENT_RADIUS, NEST_FAIL_PROB, ROOST_BUFFER_COMMUNAL, ROOST_BUFFER_SINGLE, NEST_BUFFER_VERY_HIGH, MITIGATION_BLADE_PAINT, MITIGATION_SHUTDOWN, PREY_REDUCTION_FACTOR
+from src.bayesian_utils import bayesian_update_collision_prob
+from src.data_processing import process_gps_data, process_lidar_data, process_weather_data, process_turbine_data, build_graph, Point
 
 # Harrier Agent
 class HarrierAgent(Agent):
@@ -101,17 +104,16 @@ class HarrierModel(Model):
         self.month = 1
         self.nests = [(random.uniform(20, 80), random.uniform(20, 80)) for _ in range(5)]
         self.communal_roosts = [(50, 50)]
-        self.single_roosts = [(random.uniform(0, GRID_SIZE-1), random.uniform(0, GRID_SIZE-1)) for _ in range(10)]
-        self.turbines = [(random.uniform(0, GRID_SIZE-1), random.uniform(0, GRID_SIZE-1)) for _ in range(NUM_TURBINES)]
+        self.single_roosts = [(random.uniform(0, 100-1), random.uniform(0, 100-1)) for _ in range(10)]
+        self.turbines = [(random.uniform(0, 100-1), random.uniform(0, 100-1)) for _ in range(60)]
         waypoints, agents, self.transition_probs = process_gps_data(gps_file)
         nodes = process_lidar_data(lidar_file)
         thermal_data = process_weather_data(weather_file)
         turbines = process_turbine_data(turbine_file)
         self.graph = build_graph(waypoints, nodes, turbines, thermal_data)
-        self.space = ContinuousSpace(GRID_SIZE, GRID_SIZE, torus=False)
-        self.avoidance_rate = AVOIDANCE_RATE_PRIOR
-        self.collision_prob = COLLISION_PROB_PRIOR
-        self.agents = self.schedule.agents # Use AgentSet for efficient management
+        self.space = ContinuousSpace(100, 100, torus=False)
+        self.avoidance_rate = 0.935  # AVOIDANCE_RATE_PRIOR
+        self.collision_prob = 0.15   # COLLISION_PROB_PRIOR
         for i, row in agents.iterrows():
             pos = (row['initial_pos'].x, row['initial_pos'].y)
             breeding = i < 120
@@ -120,7 +122,7 @@ class HarrierModel(Model):
             self.space.place_agent(agent, pos)
         self.datacollector = DataCollector(
             model_reporters={
-                "Population": lambda m: m.agents.select(lambda a: a.alive).count(),
+                "Population": lambda m: sum(1 for a in m.schedule.agents if a.alive),
                 "Fatalities": lambda m: m.fatalities,
                 "Fledglings": lambda m: m.fledglings,
                 "Collision_Prob": lambda m: m.collision_prob
@@ -135,12 +137,13 @@ class HarrierModel(Model):
         self.fledglings = 0
         self.curtailment_schedule = {t: [] for t in self.turbines}
         self.gps_data = pd.read_csv(gps_file)
+
     def step(self):
         self.month = (self.month % 12) + 1
         self.fatalities = 0
         self.fledglings = 0
         self.collision_prob = bayesian_update_collision_prob(self.collision_prob, self.gps_data, process_turbine_data("turbines.geojson"))
-        for agent in self.agents:
+        for agent in self.schedule.agents:
             agent.move()
             if agent.check_collision():
                 self.fatalities += 1
@@ -148,10 +151,10 @@ class HarrierModel(Model):
                     if math.sqrt((agent.pos[0] - tx)**2 + (agent.pos[1] - ty)**2) < 1:
                         self.curtailment_schedule[(tx, ty)].append((self.month, self.schedule.steps % 24))
             self.fledglings += agent.breed()
-        dead_agents = self.agents.select(lambda a: not a.alive)
+        dead_agents = [a for a in self.schedule.agents if not a.alive]
         for agent in dead_agents:
             if self.fledglings > 0:
-                new_pos = (random.uniform(0, GRID_SIZE-1), random.uniform(0, GRID_SIZE-1))
+                new_pos = (random.uniform(0, 100-1), random.uniform(0, 100-1))
                 new_agent = HarrierAgent(agent.unique_id, self, new_pos, agent.breeding)
                 self.schedule.add(new_agent)
                 self.space.place_agent(new_agent, new_pos)

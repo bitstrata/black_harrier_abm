@@ -1,95 +1,89 @@
-import numpy as np
-import pandas as pd
 import geopandas as gpd
+import pandas as pd
+import numpy as np
 import networkx as nx
-import xarray as xr
+from shapely.geometry import Point as ShapelyPoint
 from sklearn.cluster import DBSCAN
-from shapely.geometry import Point
+import xarray as xr
+from src.config import FORAGING_RANGE, NON_BREEDING_RANGE, BREEDING_MONTHS, MIGRATION_MONTHS, WIND_THRESHOLD
 
-# Process GPS Data for Markov Transitions
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def distance(self, other):
+        return np.sqrt((self.x - other.x)**2 + (self.y - other.y)**2)
+
+    def within(self, geometry):
+        from shapely.geometry import Point as ShapelyPoint
+        return ShapelyPoint(self.x, self.y).within(geometry)
+
 def process_gps_data(gps_file):
-    gps_df = pd.read_csv(gps_file, parse_dates=['timestamp'])
-    gps_df = gps_df[gps_df['speed'] < 20]  # Remove outliers
-    geometry = [Point(xy) for xy in zip(gps_df['lon'], gps_df['lat'])]
-    gps_gdf = gpd.GeoDataFrame(gps_df, geometry=geometry, crs="EPSG:4326")
-   
-    # Cluster waypoints using DBSCAN
-    coords = np.array([[p.x, p.y] for p in gps_gdf.geometry])
-    db = DBSCAN(eps=0.01, min_samples=5).fit(coords)
-    gps_gdf['cluster'] = db.labels_
-    waypoints = gps_gdf[gps_gdf['cluster'] != -1].groupby('cluster').agg({
-        'geometry': lambda x: Point(x.x.mean(), x.y.mean()),
-        'alt': 'mean'
-    }).reset_index()
-   
-    # Calculate Markov transition probabilities
-    transitions = {}
-    for harrier_id in gps_gdf['harrier_id'].unique():
-        harrier_data = gps_gdf[gps_gdf['harrier_id'] == harrier_id].sort_values('timestamp')
-        for i in range(len(harrier_data) - 1):
-            c1, c2 = harrier_data['cluster'].iloc[i], harrier_data['cluster'].iloc[i + 1]
-            month = harrier_data['timestamp'].iloc[i].month
-            if c1 != -1 and c2 != -1:
-                key = (month, c1, c2)
-                transitions[key] = transitions.get(key, 0) + 1
+    gps = pd.read_csv(gps_file)
+    gps = gps[gps['speed'] < 20]
+    coords = gps[['lat', 'lon']].values
+    db = DBSCAN(eps=0.05, min_samples=5).fit(coords)  # Increased eps to 0.05
+    gps['cluster'] = db.labels_
+    waypoints = []
+    for cluster in set(db.labels_):
+        if cluster != -1:
+            cluster_points = coords[db.labels_ == cluster]
+            centroid = cluster_points.mean(axis=0)
+            waypoints.append(Point(centroid[1], centroid[0]))
+    if not waypoints:  # Fallback: add a single waypoint if clustering fails
+        waypoints.append(Point(gps['lon'].mean(), gps['lat'].mean()))
+    agents = gps.groupby('harrier_id').first().reset_index()
+    agents['initial_pos'] = [Point(row['lon'], row['lat']) for _, row in agents.iterrows()]
     transition_probs = {}
     for month in range(1, 13):
-        month_trans = {k: v for k, v in transitions.items() if k[0] == month}
-        total = sum(month_trans.values())
-        if total > 0:
-            for k in month_trans:
-                transition_probs[k] = month_trans[k] / total
-   
-    # Agent data
-    agents = gps_gdf.groupby('harrier_id').agg({
-        'geometry': lambda x: list(x),
-        'alt': 'mean',
-        'speed': 'mean'
-    }).reset_index()
-    agents['initial_pos'] = agents['geometry'].apply(lambda x: x[0])
+        month_data = gps[gps['timestamp'].str.contains(f'-{month:02d}-')]
+        for _, row in month_data.iterrows():
+            start = min(waypoints, key=lambda p: Point(row['lon'], row['lat']).distance(p))
+            end = min(waypoints, key=lambda p: Point(row['lon'], row['lat']).distance(p))
+            transition_probs[(month, waypoints.index(start), waypoints.index(end))] = \
+                transition_probs.get((month, waypoints.index(start), waypoints.index(end)), 0) + 1
+        for i in range(len(waypoints)):
+            total = sum(transition_probs.get((month, i, j), 0) for j in range(len(waypoints)))
+            if total > 0:
+                for j in range(len(waypoints)):
+                    transition_probs[(month, i, j)] = transition_probs.get((month, i, j), 0) / total
     return waypoints, agents, transition_probs
 
-# Process LiDAR Data
 def process_lidar_data(lidar_file):
     dem = gpd.read_file(lidar_file).to_crs("EPSG:4326")
-    dem['slope'] = dem['elevation'].apply(lambda x: np.gradient(x)[0] if len(x) > 1 else 0)
     nodes = dem[dem['slope'] > 5][['geometry', 'elevation', 'slope']]
     return nodes
 
-# Process Weather Data
 def process_weather_data(weather_file):
     weather = xr.open_dataset(weather_file)
-    weather['thermal'] = weather['wind_speed'] * (1000 / weather['pressure'])
-    thermal_data = weather[['thermal', 'wind_speed']].to_dataframe().reset_index()
-    thermal_data['turbine_active'] = thermal_data['wind_speed'] > WIND_THRESHOLD
-    return thermal_data
+    weather['thermal'] = weather['wind_speed'] * 1000 / weather['pressure']
+    weather['turbine_active'] = weather['wind_speed'] > WIND_THRESHOLD
+    return weather
 
-# Process Turbine Data
 def process_turbine_data(turbine_file):
     turbines = gpd.read_file(turbine_file).to_crs("EPSG:4326")
-    turbines['collision_zone'] = turbines.geometry.buffer(turbines['blade_radius'] + 50 / 111000)
+    turbines['collision_zone'] = turbines.apply(
+        lambda row: row['geometry'].buffer(row['blade_radius'] + 50/111000), axis=1)
     return turbines
 
-# Build Dynamic Graph
-def build_graph(waypoints, nodes, turbines, thermal_data):
+def build_graph(waypoints, nodes, turbines, weather):
     G = nx.Graph()
-    for idx, row in waypoints.iterrows():
-        G.add_node(idx, pos=(row.geometry.x, row.geometry.y), elevation=row['alt'], type='waypoint')
-    for idx, row in nodes.iterrows():
-        G.add_node(idx + len(waypoints), pos=(row.geometry.x, row.geometry.y),
-                   elevation=row['elevation'], slope=row['slope'], type='terrain')
-    for idx, row in turbines.iterrows():
-        G.add_node(idx + len(waypoints) + len(nodes), pos=(row.geometry.x, row.geometry.y),
-                   type='turbine', collision_zone=row['collision_zone'])
-    for n1 in G.nodes:
-        for n2 in G.nodes:
-            if n1 < n2:
-                p1 = Point(G.nodes[n1]['pos'])
-                p2 = Point(G.nodes[n2]['pos'])
-                dist = p1.distance(p2) * 111000
-                if dist < 10000:
-                    risk = 0.3 if any(p1.within(t['collision_zone']) or p2.within(t['collision_zone'])
-                                    for _, t in turbines.iterrows()) else 0
-                    G.add_edge(n1, n2, distance=dist, turbine_risk=risk, thermal=thermal_data['thermal'].mean(),
-                               turbine_active=thermal_data['turbine_active'].mean())
+    for i, point in enumerate(waypoints):
+        G.add_node(i, pos=(point.x, point.y))
+    for i, row in nodes.iterrows():
+        G.add_node(len(waypoints) + i, pos=(row['geometry'].x, row['geometry'].y), elevation=row['elevation'])
+    for i in G.nodes:
+        for j in G.nodes:
+            if i < j:
+                dist = Point(G.nodes[i]['pos'][0], G.nodes[i]['pos'][1]).distance(
+                    Point(G.nodes[j]['pos'][0], G.nodes[j]['pos'][1]))
+                if dist < (FORAGING_RANGE if i < len(waypoints) else NON_BREEDING_RANGE):
+                    turbine_risk = 0
+                    for _, turbine in turbines.iterrows():
+                        if turbine['geometry'].distance(ShapelyPoint(G.nodes[i]['pos'])) < turbine['collision_zone'].area:
+                            turbine_risk += 0.15
+                    thermal = weather['thermal'].mean().item()
+                    G.add_edge(i, j, weight=dist, turbine_risk=turbine_risk, thermal=thermal,
+                               turbine_active=weather['turbine_active'].mean().item() > 0.5)
     return G

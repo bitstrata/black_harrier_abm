@@ -1,12 +1,11 @@
-numpy>=1.24.0
-pandas>=2.0.0
+mesa==2.3.4
+pandas>=2.0.3
 geopandas>=0.14.0
-networkx>=3.3
-xarray>=2024.6.0
-scikit-learn>=1.5.0
-shapely>=2.0.0
-mesa>=3.0.0b1  # Mesa 3 for AgentSet and Solara
-hmmlearn>=0.3.0  # Optional for HMM if needed
-scipy>=1.13.0
-solara>=1.35.0
-matplotlib>=3.9.0
+numpy>=1.24.3
+networkx==3.2.1
+solara>=1.32.0
+xarray==2023.12.0
+scikit-learn>=1.3.2
+scipy>=1.11.4
+noise>=1.2.2
+cftime>=1.6.3

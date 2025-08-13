@@ -1,6 +1,8 @@
 from scipy.stats import beta
 import numpy as np
 import random
+from src.data_processing import Point
+from src.config import BSA_HEIGHT
 
 # Bayesian Update for Collision Probability
 def bayesian_update_collision_prob(prior_prob, gps_data, turbines):
