@@ -7,6 +7,6 @@ Agent-Based Model (ABM) for predicting Black Harrier (*Circus maurus*) collision
 2. Install dependencies: `pip install -r requirements.txt`.
 
 ## Usage
-Run `src/main.py` with input files: `python src/main.py`.
+Run `main.py` . Input data will be pseudo-randomly generated. 
 
 See docs/usage.md for details.

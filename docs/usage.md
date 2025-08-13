@@ -3,7 +3,7 @@
 ## Setup
 1. Activate venv: `source .venv/bin/activate`.
 2. Place data files in `data/`.
-3. Run simulation: `python src/main.py --gps_file data/harrier_gps.csv --lidar_file data/lidar_dem.geojson --weather_file data/weather.nc --turbine_file data/turbines.geojson`.
+3. Run simulation: `python main.py .
 
 ## Outputs
 - simulation_results.csv: Population, fatalities, fledglings, collision probability.
