@@ -1,0 +1,19 @@
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+.venv/
+.env
+.DS_Store
+
+# Data (ignore large files)
+data/*.csv
+data/*.geojson
+data/*.nc
+
+# Outputs
+*.csv
+*.png
+*.html
