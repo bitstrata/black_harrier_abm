@@ -20,3 +20,11 @@ NEST_FAIL_PROB = 0.3  # Nest failure if male dies
 BREEDING_MONTHS = [7, 8, 11, 12]  # July-August, November-December
 MIGRATION_MONTHS = [1, 2, 4, 5, 6]  # December-January, April-June
 WIND_THRESHOLD = 3  # Turbine operation threshold (m/s)
+TURBINE_POWER_CURVE = [
+    (0, 0),
+    (3, 0),      # Cut-in speed
+    (5, 200),
+    (8, 1000),
+    (12, 2000),  # Rated power
+    (25, 2000),  # Cut-out speed
+]

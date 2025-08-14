@@ -1,41 +1,71 @@
-import geopandas as gpd
 import numpy as np
-import xarray as xr
+from joblib import Parallel, delayed
+from scipy.interpolate import interp1d
 from scipy.optimize import differential_evolution
-import tempfile
-from src.config import NUM_TURBINES
+import src.config as config
 
-def optimize_turbine_placement(weather_file, seed):
-    np.random.seed(seed)
-    ds = xr.open_dataset(weather_file)
-    avg_wind_speed = ds['wind_speed'].mean(dim="time").values
-    lat_grid, lon_grid = np.meshgrid(ds['lat'].values, ds['lon'].values)
-    positions = np.column_stack((lon_grid.ravel(), lat_grid.ravel()))
-    wind_values = avg_wind_speed.ravel()
-    def objective(locations, args):
-        n_turbines = args[0]
-        locations = locations.reshape(n_turbines, 2)
-        total_wind = 0
-        for loc in locations:
-            idx = np.argmin(np.linalg.norm(positions - loc, axis=1))
-            total_wind += wind_values[idx]
-        for i in range(n_turbines):
-            for j in range(i+1, n_turbines):
-                dist = np.linalg.norm(locations[i] - locations[j]) * 111000
-                if dist < 0.5:
-                    total_wind -= 1000
-        return -total_wind
-    bounds = [(25.3, 25.9), (-34.2, -33.6)] * NUM_TURBINES
-    result = differential_evolution(objective, bounds, args=[NUM_TURBINES], popsize=15, maxiter=50, workers=1, seed=seed)
-    optimized_locations = result.x.reshape(NUM_TURBINES, 2)
-    features = []
-    for lon, lat in optimized_locations:
-        features.append({
-            "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
-            "properties": {"blade_radius": np.random.uniform(50, 70)}
-        })
-    gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.geojson', delete=False) as f:
-        gdf.to_file(f.name, driver="GeoJSON")
-        return f.name
+# Precompute turbine power curve interpolator
+power_curve_speeds, power_curve_output = zip(*config.TURBINE_POWER_CURVE)
+power_fn = interp1d(power_curve_speeds, power_curve_output,
+                    kind='linear', bounds_error=False, fill_value=0.0)
+
+def simulate_layout_energy(layout_coords, wind_data, lat_grid, lon_grid):
+    """
+    Compute total annual energy (kWh) for given turbine coordinates.
+
+    layout_coords: flat list [lat1, lon1, lat2, lon2, ...]
+    wind_data: xarray.DataArray with dims [time, lat, lon]
+    lat_grid, lon_grid: arrays for spatial indexing
+    """
+    total_energy = 0.0
+
+    for i in range(0, len(layout_coords), 2):
+        lat, lon = layout_coords[i], layout_coords[i+1]
+
+        # Find nearest grid cell
+        lat_idx = np.abs(lat_grid - lat).argmin()
+        lon_idx = np.abs(lon_grid - lon).argmin()
+
+        # Extract wind speed time series
+        wind_ts = wind_data[:, lat_idx, lon_idx].values
+
+        # Convert wind speed → kW
+        power_ts = power_fn(wind_ts)  # kW at each hour
+
+        # Sum over all hours (convert kW·h to MWh if desired)
+        total_energy += power_ts.sum()
+
+    return -total_energy  # Negative for minimization
+
+def optimize_turbine_placement(wind_data, num_turbines=10, bounds=None, workers=-1):
+    """
+    Optimize turbine placement to maximize annual energy production.
+
+    wind_data: xarray.DataArray [time, lat, lon]
+    bounds: list of (min, max) tuples for lat/lon
+    workers: -1 for all CPUs
+    """
+    lat_grid = wind_data.lat.values
+    lon_grid = wind_data.lon.values
+
+    if bounds is None:
+        lat_min, lat_max = lat_grid.min(), lat_grid.max()
+        lon_min, lon_max = lon_grid.min(), lon_grid.max()
+        bounds = [(lat_min, lat_max), (lon_min, lon_max)] * num_turbines
+
+    result = differential_evolution(
+        simulate_layout_energy,
+        bounds,
+        args=(wind_data, lat_grid, lon_grid),
+        strategy='best1bin',
+        maxiter=100,
+        popsize=15,
+        tol=0.01,
+        mutation=(0.5, 1),
+        recombination=0.7,
+        polish=True,
+        workers=workers,
+        updating='deferred'  # Necessary for parallelization
+    )
+
+    return result

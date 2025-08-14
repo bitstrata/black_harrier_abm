@@ -2,6 +2,7 @@ from mesa import Agent, Model
 from mesa.time import RandomActivation
 from mesa.space import ContinuousSpace
 from mesa.datacollection import DataCollector
+import numpy as np
 import pandas as pd
 import random
 import math
